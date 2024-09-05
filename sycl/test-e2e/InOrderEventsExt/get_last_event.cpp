@@ -1,3 +1,5 @@
+// https://github.com/intel/llvm/issues/14324
+// UNSUPPORTED: windows
 // RUN: %{build} -o %t.out
 // RUN: %{run} %t.out
 
@@ -10,8 +12,11 @@
 // OBS: The above note does not apply to equality of events returned after a
 //      call to ext_oneapi_set_external_event.
 
+#include <sycl/detail/core.hpp>
+#include <sycl/properties/all_properties.hpp>
+#include <sycl/usm.hpp>
+
 #include <iostream>
-#include <sycl.hpp>
 
 template <typename F>
 int Check(const sycl::queue &Q, const char *CheckName, const F &CheckFunc) {

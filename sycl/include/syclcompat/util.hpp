@@ -34,7 +34,8 @@
 #include <cassert>
 #include <type_traits>
 
-#include <sycl/sycl.hpp>
+#include <sycl/atomic_ref.hpp>
+#include <sycl/group_barrier.hpp>
 
 #include <syclcompat/math.hpp>
 #include <syclcompat/memory.hpp>
@@ -921,7 +922,8 @@ public:
 /// If x <= 2, then return a pointer to the default queue;
 /// otherwise, return x reinterpreted as a queue_ptr.
 inline queue_ptr int_as_queue_ptr(uintptr_t x) {
-  return x <= 2 ? &get_default_queue() : reinterpret_cast<queue_ptr>(x);
+  return x <= 2 ? detail::dev_mgr::instance().current_device().default_queue()
+                : reinterpret_cast<queue_ptr>(x);
 }
 
 template <int n_nondefault_params, int n_default_params, typename T>

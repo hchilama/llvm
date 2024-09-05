@@ -8,12 +8,17 @@
 
 #pragma once
 
+#include <sycl/detail/spirv.hpp>
+#include <sycl/ext/oneapi/experimental/use_root_sync_prop.hpp>
 #include <sycl/ext/oneapi/free_function_queries.hpp>
-#include <sycl/ext/oneapi/properties/properties.hpp>
 #include <sycl/group.hpp>
 #include <sycl/memory_enums.hpp>
 #include <sycl/nd_item.hpp>
 #include <sycl/sub_group.hpp>
+
+#ifdef __SYCL_DEVICE_ONLY__
+#include <sycl/ext/oneapi/functional.hpp>
+#endif
 
 namespace sycl {
 inline namespace _V1 {
@@ -26,13 +31,6 @@ struct max_num_work_group_sync {
   using return_type = size_t;
 };
 } // namespace info::kernel_queue_specific
-
-struct use_root_sync_key
-    : detail::compile_time_property_key<detail::PropKind::UseRootSync> {
-  using value_t = property_value<use_root_sync_key>;
-};
-
-inline constexpr use_root_sync_key::value_t use_root_sync;
 
 template <int Dimensions> class root_group {
 public:
@@ -117,8 +115,8 @@ void group_barrier(ext::oneapi::experimental::root_group<dimensions> G,
 #else
   (void)G;
   (void)FenceScope;
-  throw sycl::runtime_error("Barriers are not supported on host device",
-                            PI_ERROR_INVALID_DEVICE);
+  throw sycl::exception(make_error_code(errc::runtime),
+                        "Barriers are not supported on host");
 #endif
 }
 

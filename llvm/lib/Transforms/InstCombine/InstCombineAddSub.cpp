@@ -819,11 +819,16 @@ static Instruction *foldNoWrapAdd(BinaryOperator &Add,
   Value *X;
   const APInt *C1, *C2;
   if (match(Op1, m_APInt(C1)) &&
-      match(Op0, m_OneUse(m_ZExt(m_NUWAddLike(m_Value(X), m_APInt(C2))))) &&
+      match(Op0, m_ZExt(m_NUWAddLike(m_Value(X), m_APInt(C2)))) &&
       C1->isNegative() && C1->sge(-C2->sext(C1->getBitWidth()))) {
-    Constant *NewC =
-        ConstantInt::get(X->getType(), *C2 + C1->trunc(C2->getBitWidth()));
-    return new ZExtInst(Builder.CreateNUWAdd(X, NewC), Ty);
+    APInt NewC = *C2 + C1->trunc(C2->getBitWidth());
+    // If the smaller add will fold to zero, we don't need to check one use.
+    if (NewC.isZero())
+      return new ZExtInst(X, Ty);
+    // Otherwise only do this if the existing zero extend will be removed.
+    if (Op0->hasOneUse())
+      return new ZExtInst(
+          Builder.CreateNUWAdd(X, ConstantInt::get(X->getType(), NewC)), Ty);
   }
 
   // More general combining of constants in the wide type.
@@ -905,8 +910,14 @@ Instruction *InstCombinerImpl::foldAddWithConstant(BinaryOperator &Add) {
 
   // (X | Op01C) + Op1C --> X + (Op01C + Op1C) iff the `or` is actually an `add`
   Constant *Op01C;
-  if (match(Op0, m_DisjointOr(m_Value(X), m_ImmConstant(Op01C))))
-    return BinaryOperator::CreateAdd(X, ConstantExpr::getAdd(Op01C, Op1C));
+  if (match(Op0, m_DisjointOr(m_Value(X), m_ImmConstant(Op01C)))) {
+    BinaryOperator *NewAdd =
+        BinaryOperator::CreateAdd(X, ConstantExpr::getAdd(Op01C, Op1C));
+    NewAdd->setHasNoSignedWrap(Add.hasNoSignedWrap() &&
+                               willNotOverflowSignedAdd(Op01C, Op1C, Add));
+    NewAdd->setHasNoUnsignedWrap(Add.hasNoUnsignedWrap());
+    return NewAdd;
+  }
 
   // (X | C2) + C --> (X | C2) ^ C2 iff (C2 == -C)
   const APInt *C2;
@@ -1014,7 +1025,7 @@ static bool matchesSquareSum(BinaryOperator &I, Mul2Rhs M2Rhs, Value *&A,
   // (a * a) + (((a * 2) + b) * b)
   if (match(&I, m_c_BinOp(
                     AddOp, m_OneUse(m_BinOp(MulOp, m_Value(A), m_Deferred(A))),
-                    m_OneUse(m_BinOp(
+                    m_OneUse(m_c_BinOp(
                         MulOp,
                         m_c_BinOp(AddOp, m_BinOp(Mul2Op, m_Deferred(A), M2Rhs),
                                   m_Value(B)),
@@ -1025,16 +1036,16 @@ static bool matchesSquareSum(BinaryOperator &I, Mul2Rhs M2Rhs, Value *&A,
   // +
   // (a * a + b * b) or (b * b + a * a)
   return match(
-      &I,
-      m_c_BinOp(AddOp,
-                m_CombineOr(
-                    m_OneUse(m_BinOp(
-                        Mul2Op, m_BinOp(MulOp, m_Value(A), m_Value(B)), M2Rhs)),
-                    m_OneUse(m_BinOp(MulOp, m_BinOp(Mul2Op, m_Value(A), M2Rhs),
+      &I, m_c_BinOp(
+              AddOp,
+              m_CombineOr(
+                  m_OneUse(m_BinOp(
+                      Mul2Op, m_BinOp(MulOp, m_Value(A), m_Value(B)), M2Rhs)),
+                  m_OneUse(m_c_BinOp(MulOp, m_BinOp(Mul2Op, m_Value(A), M2Rhs),
                                      m_Value(B)))),
-                m_OneUse(m_c_BinOp(
-                    AddOp, m_BinOp(MulOp, m_Deferred(A), m_Deferred(A)),
-                    m_BinOp(MulOp, m_Deferred(B), m_Deferred(B))))));
+              m_OneUse(
+                  m_c_BinOp(AddOp, m_BinOp(MulOp, m_Deferred(A), m_Deferred(A)),
+                            m_BinOp(MulOp, m_Deferred(B), m_Deferred(B))))));
 }
 
 // Fold integer variations of a^2 + 2*a*b + b^2 -> (a + b)^2
@@ -1683,15 +1694,32 @@ Instruction *InstCombinerImpl::visitAdd(BinaryOperator &I) {
 
   // Canonicalize signum variant that ends in add:
   // (A s>> (BW - 1)) + (zext (A s> 0)) --> (A s>> (BW - 1)) | (zext (A != 0))
-  ICmpInst::Predicate Pred;
   uint64_t BitWidth = Ty->getScalarSizeInBits();
   if (match(LHS, m_AShr(m_Value(A), m_SpecificIntAllowPoison(BitWidth - 1))) &&
-      match(RHS, m_OneUse(m_ZExt(
-                     m_OneUse(m_ICmp(Pred, m_Specific(A), m_ZeroInt()))))) &&
-      Pred == CmpInst::ICMP_SGT) {
+      match(RHS, m_OneUse(m_ZExt(m_OneUse(m_SpecificICmp(
+                     CmpInst::ICMP_SGT, m_Specific(A), m_ZeroInt())))))) {
     Value *NotZero = Builder.CreateIsNotNull(A, "isnotnull");
     Value *Zext = Builder.CreateZExt(NotZero, Ty, "isnotnull.zext");
     return BinaryOperator::CreateOr(LHS, Zext);
+  }
+
+  {
+    Value *Cond, *Ext;
+    Constant *C;
+    // (add X, (sext/zext (icmp eq X, C)))
+    //    -> (select (icmp eq X, C), (add C, (sext/zext 1)), X)
+    auto CondMatcher = m_CombineAnd(
+        m_Value(Cond),
+        m_SpecificICmp(ICmpInst::ICMP_EQ, m_Deferred(A), m_ImmConstant(C)));
+
+    if (match(&I,
+              m_c_Add(m_Value(A),
+                      m_CombineAnd(m_Value(Ext), m_ZExtOrSExt(CondMatcher)))) &&
+        Ext->hasOneUse()) {
+      Value *Add = isa<ZExtInst>(Ext) ? InstCombiner::AddOne(C)
+                                      : InstCombiner::SubOne(C);
+      return replaceInstUsesWith(I, Builder.CreateSelect(Cond, Add, A));
+    }
   }
 
   if (Instruction *Ashr = foldAddToAshr(I))
@@ -1762,6 +1790,7 @@ Instruction *InstCombinerImpl::visitAdd(BinaryOperator &I) {
   // -->
   // BW - ctlz(A - 1, false)
   const APInt *XorC;
+  ICmpInst::Predicate Pred;
   if (match(&I,
             m_c_Add(
                 m_ZExt(m_ICmp(Pred, m_Intrinsic<Intrinsic::ctpop>(m_Value(A)),
@@ -2001,43 +2030,30 @@ Value *InstCombinerImpl::OptimizePointerDifference(Value *LHS, Value *RHS,
   if (!GEP1)
     return nullptr;
 
-  if (GEP2) {
-    // (gep X, ...) - (gep X, ...)
-    //
-    // Avoid duplicating the arithmetic if there are more than one non-constant
-    // indices between the two GEPs and either GEP has a non-constant index and
-    // multiple users. If zero non-constant index, the result is a constant and
-    // there is no duplication. If one non-constant index, the result is an add
-    // or sub with a constant, which is no larger than the original code, and
-    // there's no duplicated arithmetic, even if either GEP has multiple
-    // users. If more than one non-constant indices combined, as long as the GEP
-    // with at least one non-constant index doesn't have multiple users, there
-    // is no duplication.
-    unsigned NumNonConstantIndices1 = GEP1->countNonConstantIndices();
-    unsigned NumNonConstantIndices2 = GEP2->countNonConstantIndices();
-    if (NumNonConstantIndices1 + NumNonConstantIndices2 > 1 &&
-        ((NumNonConstantIndices1 > 0 && !GEP1->hasOneUse()) ||
-         (NumNonConstantIndices2 > 0 && !GEP2->hasOneUse()))) {
-      return nullptr;
-    }
-  }
+  // To avoid duplicating the offset arithmetic, rewrite the GEP to use the
+  // computed offset. This may erase the original GEP, so be sure to cache the
+  // inbounds flag before emitting the offset.
+  // TODO: We should probably do this even if there is only one GEP.
+  bool RewriteGEPs = GEP2 != nullptr;
 
   // Emit the offset of the GEP and an intptr_t.
-  Value *Result = EmitGEPOffset(GEP1);
+  bool GEP1IsInBounds = GEP1->isInBounds();
+  Value *Result = EmitGEPOffset(GEP1, RewriteGEPs);
 
   // If this is a single inbounds GEP and the original sub was nuw,
   // then the final multiplication is also nuw.
   if (auto *I = dyn_cast<Instruction>(Result))
-    if (IsNUW && !GEP2 && !Swapped && GEP1->isInBounds() &&
+    if (IsNUW && !GEP2 && !Swapped && GEP1IsInBounds &&
         I->getOpcode() == Instruction::Mul)
       I->setHasNoUnsignedWrap();
 
   // If we have a 2nd GEP of the same base pointer, subtract the offsets.
   // If both GEPs are inbounds, then the subtract does not have signed overflow.
   if (GEP2) {
-    Value *Offset = EmitGEPOffset(GEP2);
+    bool GEP2IsInBounds = GEP2->isInBounds();
+    Value *Offset = EmitGEPOffset(GEP2, RewriteGEPs);
     Result = Builder.CreateSub(Result, Offset, "gepdiff", /* NUW */ false,
-                               GEP1->isInBounds() && GEP2->isInBounds());
+                               GEP1IsInBounds && GEP2IsInBounds);
   }
 
   // If we have p - gep(p, ...)  then we have to negate the result.
@@ -2779,6 +2795,16 @@ Instruction *InstCombinerImpl::visitFNeg(UnaryOperator &I) {
       Value *NegX = Builder.CreateFNegFMF(X, &I, X->getName() + ".neg");
       SelectInst *NewSel = SelectInst::Create(Cond, NegX, P);
       propagateSelectFMF(NewSel, P == X);
+      return NewSel;
+    }
+
+    // -(Cond ? X : C) --> Cond ? -X : -C
+    // -(Cond ? C : Y) --> Cond ? -C : -Y
+    if (match(X, m_ImmConstant()) || match(Y, m_ImmConstant())) {
+      Value *NegX = Builder.CreateFNegFMF(X, &I, X->getName() + ".neg");
+      Value *NegY = Builder.CreateFNegFMF(Y, &I, Y->getName() + ".neg");
+      SelectInst *NewSel = SelectInst::Create(Cond, NegX, NegY);
+      propagateSelectFMF(NewSel, /*CommonOperand=*/true);
       return NewSel;
     }
   }

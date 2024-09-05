@@ -57,6 +57,13 @@ enum class ShaderStage {
   Invalid,
 };
 
+enum class PointerAuthenticationMode : unsigned {
+  None,
+  Strip,
+  SignAndStrip,
+  SignAndAuth
+};
+
 /// Bitfields of LangOptions, split out from LangOptions in order to ensure that
 /// this large collection of bitfields is a trivial class type.
 class LangOptionsBase {
@@ -139,7 +146,6 @@ public:
 
   enum SYCLMajorVersion {
     SYCL_None,
-    SYCL_2017,
     SYCL_2020,
     // The "default" SYCL version to be used when none is specified on the
     // frontend command line.
@@ -147,7 +153,6 @@ public:
   };
 
   enum class SYCLVersionList {
-    sycl_1_2_1,
     undefined
   };
 
@@ -609,6 +614,10 @@ public:
   // implementation on real-world examples.
   std::string OpenACCMacroOverride;
 
+  // Indicates if the wasm-opt binary must be ignored in the case of a
+  // WebAssembly target.
+  bool NoWasmOpt = false;
+
   LangOptions();
 
   /// Set language defaults for the given input language and
@@ -1002,10 +1011,7 @@ public:
       setAllowFPContractAcrossStatement();
   }
 
-  void setDisallowOptimizations() {
-    setFPPreciseEnabled(true);
-    setDisallowFPContract();
-  }
+  void setDisallowOptimizations() { setFPPreciseEnabled(true); }
 
   storage_type getAsOpaqueInt() const {
     return (static_cast<storage_type>(Options.getAsOpaqueInt())

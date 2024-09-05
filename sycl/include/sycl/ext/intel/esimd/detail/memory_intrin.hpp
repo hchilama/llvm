@@ -11,6 +11,13 @@
 
 /// @cond ESIMD_DETAIL
 
+/// **************************** WARNING ************************************
+/// When declaring new SPIR-V intrinsics (functions starting with __spirv),
+/// it is imperitive to exactly follow the pattern of the existing SPIR-V
+/// intrinsics. If not followed, the declaration may conflict with
+/// the Clang-generated functions and cause compilation errors.
+/// **************************** WARNING ************************************
+
 #pragma once
 
 #include <sycl/accessor.hpp>
@@ -1129,5 +1136,39 @@ __ESIMD_INTRIN void __esimd_lsc_store2d_stateless(
     __ESIMD_DNS::simd_mask_storage_t<1> Pred, uintptr_t Ptr, int SurfaceWidth,
     int SurfaceHeight, int SurfacePitch, int X, int Y,
     __ESIMD_DNS::vector_type_t<Ty, N> vals) __ESIMD_INTRIN_END;
+
+/// Represents named barrier synchronization for a subgroup of threads.
+/// Available only on PVC
+///
+/// @param mode  - is wait(0) or signal(1)
+///
+/// @param id  - barrier id
+///
+/// @param thread_count  - number of threads, ignored in 'wait' mode
+__ESIMD_INTRIN void __esimd_nbarrier(uint8_t mode, uint8_t id,
+                                     uint8_t thread_count) __ESIMD_INTRIN_END;
+
+/// Initialize number of named barriers for a kernel
+/// Available only on PVC
+///
+/// @param count  - number of named barriers
+__ESIMD_INTRIN void __esimd_nbarrier_init(uint8_t count) __ESIMD_INTRIN_END;
+
+/// Perform signal operation on named barriers
+/// Available only on PVC
+/// @param id - barrier id
+///
+/// @param thread_role - thread role
+///
+/// @param num_producers - number of producers
+///
+/// @param num_consumers - number of consumers
+__ESIMD_INTRIN void
+__esimd_nbarrier_arrive(uint8_t id, uint8_t thread_role, uint8_t num_producers,
+                        uint8_t num_consumers) __ESIMD_INTRIN_END;
+
+__ESIMD_INTRIN uint32_t __esimd_slm_alloc(uint32_t size) __ESIMD_INTRIN_END;
+
+__ESIMD_INTRIN void __esimd_slm_free(uint32_t id) __ESIMD_INTRIN_END;
 
 /// @endcond ESIMD_DETAIL

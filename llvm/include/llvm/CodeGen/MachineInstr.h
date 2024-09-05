@@ -117,6 +117,8 @@ public:
     NoConvergent = 1 << 17,  // Call does not require convergence guarantees.
     NonNeg = 1 << 18,        // The operand is non-negative.
     Disjoint = 1 << 19,      // Each bit is zero in at least one of the inputs.
+    NoUSWrap = 1 << 20,      // Instruction supports geps
+                             // no unsigned signed wrap.
   };
 
 private:
@@ -302,6 +304,9 @@ private:
   /// defined by this instruction.
   unsigned DebugInstrNum;
 
+  /// Cached opcode from MCID.
+  uint16_t Opcode;
+
   // Intrusive list support
   friend struct ilist_traits<MachineInstr>;
   friend struct ilist_callback_traits<MachineBasicBlock>;
@@ -414,6 +419,12 @@ public:
     assert(isUInt<LLVM_MI_FLAGS_BITS>(unsigned(Flag)) &&
            "Flag to clear is out of range for the Flags field");
     Flags &= ~((uint32_t)Flag);
+  }
+
+  void clearFlags(unsigned flags) {
+    assert(isUInt<LLVM_MI_FLAGS_BITS>(flags) &&
+           "flags to be cleared are out of range for the Flags field");
+    Flags &= ~flags;
   }
 
   /// Return true if MI is in a bundle (but not the first MI in a bundle).
@@ -555,7 +566,7 @@ public:
   const MCInstrDesc &getDesc() const { return *MCID; }
 
   /// Returns the opcode of this MachineInstr.
-  unsigned getOpcode() const { return MCID->Opcode; }
+  unsigned getOpcode() const { return Opcode; }
 
   /// Retuns the total number of operands.
   unsigned getNumOperands() const { return NumOperands; }
@@ -1466,9 +1477,8 @@ public:
   /// is a read of a super-register.
   /// This does not count partial redefines of virtual registers as reads:
   ///   %reg1024:6 = OP.
-  bool readsRegister(Register Reg,
-                     const TargetRegisterInfo *TRI = nullptr) const {
-    return findRegisterUseOperandIdx(Reg, false, TRI) != -1;
+  bool readsRegister(Register Reg, const TargetRegisterInfo *TRI) const {
+    return findRegisterUseOperandIdx(Reg, TRI, false) != -1;
   }
 
   /// Return true if the MachineInstr reads the specified virtual register.
@@ -1487,34 +1497,30 @@ public:
   /// Return true if the MachineInstr kills the specified register.
   /// If TargetRegisterInfo is non-null, then it also checks if there is
   /// a kill of a super-register.
-  bool killsRegister(Register Reg,
-                     const TargetRegisterInfo *TRI = nullptr) const {
-    return findRegisterUseOperandIdx(Reg, true, TRI) != -1;
+  bool killsRegister(Register Reg, const TargetRegisterInfo *TRI) const {
+    return findRegisterUseOperandIdx(Reg, TRI, true) != -1;
   }
 
   /// Return true if the MachineInstr fully defines the specified register.
   /// If TargetRegisterInfo is non-null, then it also checks
   /// if there is a def of a super-register.
   /// NOTE: It's ignoring subreg indices on virtual registers.
-  bool definesRegister(Register Reg,
-                       const TargetRegisterInfo *TRI = nullptr) const {
-    return findRegisterDefOperandIdx(Reg, false, false, TRI) != -1;
+  bool definesRegister(Register Reg, const TargetRegisterInfo *TRI) const {
+    return findRegisterDefOperandIdx(Reg, TRI, false, false) != -1;
   }
 
   /// Return true if the MachineInstr modifies (fully define or partially
   /// define) the specified register.
   /// NOTE: It's ignoring subreg indices on virtual registers.
-  bool modifiesRegister(Register Reg,
-                        const TargetRegisterInfo *TRI = nullptr) const {
-    return findRegisterDefOperandIdx(Reg, false, true, TRI) != -1;
+  bool modifiesRegister(Register Reg, const TargetRegisterInfo *TRI) const {
+    return findRegisterDefOperandIdx(Reg, TRI, false, true) != -1;
   }
 
   /// Returns true if the register is dead in this machine instruction.
   /// If TargetRegisterInfo is non-null, then it also checks
   /// if there is a dead def of a super-register.
-  bool registerDefIsDead(Register Reg,
-                         const TargetRegisterInfo *TRI = nullptr) const {
-    return findRegisterDefOperandIdx(Reg, true, false, TRI) != -1;
+  bool registerDefIsDead(Register Reg, const TargetRegisterInfo *TRI) const {
+    return findRegisterDefOperandIdx(Reg, TRI, true, false) != -1;
   }
 
   /// Returns true if the MachineInstr has an implicit-use operand of exactly
@@ -1524,22 +1530,23 @@ public:
   /// Returns the operand index that is a use of the specific register or -1
   /// if it is not found. It further tightens the search criteria to a use
   /// that kills the register if isKill is true.
-  int findRegisterUseOperandIdx(Register Reg, bool isKill = false,
-                                const TargetRegisterInfo *TRI = nullptr) const;
+  int findRegisterUseOperandIdx(Register Reg, const TargetRegisterInfo *TRI,
+                                bool isKill = false) const;
 
   /// Wrapper for findRegisterUseOperandIdx, it returns
   /// a pointer to the MachineOperand rather than an index.
-  MachineOperand *findRegisterUseOperand(Register Reg, bool isKill = false,
-                                      const TargetRegisterInfo *TRI = nullptr) {
-    int Idx = findRegisterUseOperandIdx(Reg, isKill, TRI);
+  MachineOperand *findRegisterUseOperand(Register Reg,
+                                         const TargetRegisterInfo *TRI,
+                                         bool isKill = false) {
+    int Idx = findRegisterUseOperandIdx(Reg, TRI, isKill);
     return (Idx == -1) ? nullptr : &getOperand(Idx);
   }
 
-  const MachineOperand *findRegisterUseOperand(
-    Register Reg, bool isKill = false,
-    const TargetRegisterInfo *TRI = nullptr) const {
-    return const_cast<MachineInstr *>(this)->
-      findRegisterUseOperand(Reg, isKill, TRI);
+  const MachineOperand *findRegisterUseOperand(Register Reg,
+                                               const TargetRegisterInfo *TRI,
+                                               bool isKill = false) const {
+    return const_cast<MachineInstr *>(this)->findRegisterUseOperand(Reg, TRI,
+                                                                    isKill);
   }
 
   /// Returns the operand index that is a def of the specified register or
@@ -1548,26 +1555,26 @@ public:
   /// overlap the specified register. If TargetRegisterInfo is non-null,
   /// then it also checks if there is a def of a super-register.
   /// This may also return a register mask operand when Overlap is true.
-  int findRegisterDefOperandIdx(Register Reg,
-                                bool isDead = false, bool Overlap = false,
-                                const TargetRegisterInfo *TRI = nullptr) const;
+  int findRegisterDefOperandIdx(Register Reg, const TargetRegisterInfo *TRI,
+                                bool isDead = false,
+                                bool Overlap = false) const;
 
   /// Wrapper for findRegisterDefOperandIdx, it returns
   /// a pointer to the MachineOperand rather than an index.
-  MachineOperand *
-  findRegisterDefOperand(Register Reg, bool isDead = false,
-                         bool Overlap = false,
-                         const TargetRegisterInfo *TRI = nullptr) {
-    int Idx = findRegisterDefOperandIdx(Reg, isDead, Overlap, TRI);
+  MachineOperand *findRegisterDefOperand(Register Reg,
+                                         const TargetRegisterInfo *TRI,
+                                         bool isDead = false,
+                                         bool Overlap = false) {
+    int Idx = findRegisterDefOperandIdx(Reg, TRI, isDead, Overlap);
     return (Idx == -1) ? nullptr : &getOperand(Idx);
   }
 
-  const MachineOperand *
-  findRegisterDefOperand(Register Reg, bool isDead = false,
-                         bool Overlap = false,
-                         const TargetRegisterInfo *TRI = nullptr) const {
+  const MachineOperand *findRegisterDefOperand(Register Reg,
+                                               const TargetRegisterInfo *TRI,
+                                               bool isDead = false,
+                                               bool Overlap = false) const {
     return const_cast<MachineInstr *>(this)->findRegisterDefOperand(
-        Reg, isDead, Overlap, TRI);
+        Reg, TRI, isDead, Overlap);
   }
 
   /// Find the index of the first operand in the
@@ -1716,7 +1723,7 @@ public:
   /// Return true if it is safe to move this instruction. If
   /// SawStore is set to true, it means that there is a store (or call) between
   /// the instruction's location and its intended destination.
-  bool isSafeToMove(AAResults *AA, bool &SawStore) const;
+  bool isSafeToMove(bool &SawStore) const;
 
   /// Returns true if this instruction's memory access aliases the memory
   /// access of Other.

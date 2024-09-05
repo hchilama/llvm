@@ -442,7 +442,7 @@ bool getSPIRVBuiltin(const std::string &OrigName, spv::BuiltIn &B) {
 // if true is returned
 bool oclIsBuiltin(StringRef Name, StringRef &DemangledName, bool IsCpp) {
   if (Name == "printf") {
-    DemangledName = Name;
+    DemangledName = "__spirv_ocl_printf";
     return true;
   }
   if (isNonMangledOCLBuiltin(Name)) {
@@ -915,8 +915,7 @@ bool getRetParamSignedness(Function *F, ParamSignedness &RetSignedness,
       StringRef Arg(stringify(Name));
       if (Arg.starts_with("unsigned"))
         return ParamSignedness::Unsigned;
-      if (Arg.equals("char") || Arg.equals("short") || Arg.equals("int") ||
-          Arg.equals("long"))
+      if (Arg == "char" || Arg == "short" || Arg == "int" || Arg == "long")
         return ParamSignedness::Signed;
     }
     return ParamSignedness::Unknown;
@@ -1567,6 +1566,9 @@ Type *getLLVMTypeForSPIRVImageSampledTypePostfix(StringRef Postfix,
   if (Postfix == kSPIRVImageSampledTypeName::Int ||
       Postfix == kSPIRVImageSampledTypeName::UInt)
     return Type::getInt32Ty(Ctx);
+  if (Postfix == kSPIRVImageSampledTypeName::Long ||
+      Postfix == kSPIRVImageSampledTypeName::ULong)
+    return Type::getInt64Ty(Ctx);
   llvm_unreachable("Invalid sampled type postfix");
   return nullptr;
 }
@@ -1846,9 +1848,13 @@ std::string decodeSPIRVTypeName(StringRef Name,
 // Returns true if type(s) and number of elements (if vector) is valid
 bool checkTypeForSPIRVExtendedInstLowering(IntrinsicInst *II, SPIRVModule *BM) {
   switch (II->getIntrinsicID()) {
+  case Intrinsic::acos:
+  case Intrinsic::asin:
+  case Intrinsic::atan:
   case Intrinsic::ceil:
   case Intrinsic::copysign:
   case Intrinsic::cos:
+  case Intrinsic::cosh:
   case Intrinsic::exp:
   case Intrinsic::exp2:
   case Intrinsic::fabs:
@@ -1868,7 +1874,10 @@ bool checkTypeForSPIRVExtendedInstLowering(IntrinsicInst *II, SPIRVModule *BM) {
   case Intrinsic::round:
   case Intrinsic::roundeven:
   case Intrinsic::sin:
+  case Intrinsic::sinh:
   case Intrinsic::sqrt:
+  case Intrinsic::tan:
+  case Intrinsic::tanh:
   case Intrinsic::trunc: {
     // Although some of the intrinsics above take multiple arguments, it is
     // sufficient to check arg 0 because the LLVM Verifier will have checked
@@ -2331,7 +2340,7 @@ public:
 
   void init(StringRef UniqUnmangledName) override {
     UnmangledName = UniqUnmangledName.str();
-    switch (OC) {
+    switch (static_cast<unsigned>(OC)) {
     case OpConvertUToF:
     case OpUConvert:
     case OpSatConvertUToS:
@@ -2496,6 +2505,11 @@ public:
       }
       break;
     }
+    case internal::OpConvertHandleToImageINTEL:
+    case internal::OpConvertHandleToSamplerINTEL:
+    case internal::OpConvertHandleToSampledImageINTEL:
+      addUnsignedArg(0);
+      break;
     default:;
       // No special handling is needed
     }
