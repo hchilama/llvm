@@ -12,6 +12,7 @@
 
 #include <sycl/detail/common.hpp>
 #include <sycl/event.hpp>
+#include <sycl/ext/oneapi/experimental/graph.hpp>
 #include <sycl/ext/oneapi/properties/properties.hpp>
 #include <sycl/handler.hpp>
 #include <sycl/nd_range.hpp>
@@ -73,6 +74,13 @@ private:
   friend struct detail::LaunchConfigAccess;
 };
 
+#ifdef __cpp_deduction_guides
+// CTAD work-around to avoid warning from GCC when using default deduction
+// guidance.
+launch_config(detail::AllowCTADTag)
+    -> launch_config<void, empty_properties_t, void>;
+#endif // __cpp_deduction_guides
+
 namespace detail {
 // Helper for accessing the members of launch_config.
 template <typename LCRangeT, typename LCPropertiesT> struct LaunchConfigAccess {
@@ -88,10 +96,18 @@ template <typename LCRangeT, typename LCPropertiesT> struct LaunchConfigAccess {
   }
 };
 
-template <typename CommandGroupFunc>
-void submit_impl(queue &Q, CommandGroupFunc &&CGF,
+template <typename CommandGroupFunc, typename PropertiesT>
+void submit_impl(queue &Q, PropertiesT Props, CommandGroupFunc &&CGF,
                  const sycl::detail::code_location &CodeLoc) {
-  Q.submit_without_event(std::forward<CommandGroupFunc>(CGF), CodeLoc);
+  Q.submit_without_event(Props, std::forward<CommandGroupFunc>(CGF), CodeLoc);
+}
+
+template <typename CommandGroupFunc, typename PropertiesT>
+event submit_with_event_impl(queue &Q, PropertiesT Props,
+                             CommandGroupFunc &&CGF,
+                             const sycl::detail::code_location &CodeLoc) {
+  return Q.submit_with_event(Props, std::forward<CommandGroupFunc>(CGF),
+                             nullptr, CodeLoc);
 }
 } // namespace detail
 
@@ -99,9 +115,8 @@ template <typename CommandGroupFunc, typename PropertiesT>
 void submit(queue Q, PropertiesT Props, CommandGroupFunc &&CGF,
             const sycl::detail::code_location &CodeLoc =
                 sycl::detail::code_location::current()) {
-  std::ignore = Props;
   sycl::ext::oneapi::experimental::detail::submit_impl(
-      Q, std::forward<CommandGroupFunc>(CGF), CodeLoc);
+      Q, Props, std::forward<CommandGroupFunc>(CGF), CodeLoc);
 }
 
 template <typename CommandGroupFunc>
@@ -115,8 +130,8 @@ template <typename CommandGroupFunc, typename PropertiesT>
 event submit_with_event(queue Q, PropertiesT Props, CommandGroupFunc &&CGF,
                         const sycl::detail::code_location &CodeLoc =
                             sycl::detail::code_location::current()) {
-  std::ignore = Props;
-  return Q.submit(std::forward<CommandGroupFunc>(CGF), CodeLoc);
+  return sycl::ext::oneapi::experimental::detail::submit_with_event_impl(
+      Q, Props, std::forward<CommandGroupFunc>(CGF), CodeLoc);
 }
 
 template <typename CommandGroupFunc>
@@ -381,6 +396,17 @@ inline void partial_barrier(queue Q, const std::vector<event> &Events,
                             const sycl::detail::code_location &CodeLoc =
                                 sycl::detail::code_location::current()) {
   submit(Q, [&](handler &CGH) { partial_barrier(CGH, Events); }, CodeLoc);
+}
+
+inline void execute_graph(queue Q, command_graph<graph_state::executable> &G,
+                          const sycl::detail::code_location &CodeLoc =
+                              sycl::detail::code_location::current()) {
+  Q.ext_oneapi_graph(G, CodeLoc);
+}
+
+inline void execute_graph(handler &CGH,
+                          command_graph<graph_state::executable> &G) {
+  CGH.ext_oneapi_graph(G);
 }
 
 } // namespace ext::oneapi::experimental

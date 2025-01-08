@@ -14,7 +14,7 @@ on:
       build_image:
         type: string
         required: false
-        default: "ghcr.io/intel/llvm/ubuntu2204_build:latest"
+        default: "ghcr.io/intel/llvm/ubuntu2404_build:latest"
       build_ref:
         type: string
         required: false
@@ -50,6 +50,9 @@ on:
         description: 'Artifacts retention period'
         type: string
         default: 3
+      ref:
+        type: string
+        required: false
 
     outputs:
       build_conclusion:
@@ -143,6 +146,7 @@ jobs:
       with:
         sparse-checkout: |
           devops/actions
+        ref: ${{ inputs.ref || github.sha }}
     # Cleanup will be run after all actions are completed.
     - name: Register cleanup after job is finished
       uses: ./devops/actions/cleanup
@@ -169,7 +173,6 @@ jobs:
           --cmake-opt=-DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
           --cmake-opt="-DLLVM_INSTALL_UTILS=ON" \
           --cmake-opt="-DNATIVECPU_USE_OCK=Off" \
-          --cmake-opt="-DSYCL_PI_TESTS=OFF" \
           --cmake-opt="-DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=SPIRV"
     - name: Compile
       id: build
